@@ -23,3 +23,5 @@ The script is designed around 8 phases.
 The next step would be to go around to Phase 1.
 
 If issues are found following the switch, you can move backwards to revert to the previous environment.
+
+The idea is that something like Azure DevOps could also be used to update the SSM variable and run the CloudFormation script as part of the pipeline. This was created because CodeDeploy doesn't have enough options current around the time it takes for instances to be ready.
