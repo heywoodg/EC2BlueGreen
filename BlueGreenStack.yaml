@@ -1,0 +1,456 @@
+# Blue/Green Cloudformation template
+# Greg Heywood
+# V1.0
+# 14/11/2020
+
+
+AWSTemplateFormatVersion: 2010-09-09
+Description: Blue/Green stack
+Parameters:
+  SourceCodeFile:
+    Type: String
+    Description: Name of zip file that has been uploaded to the code repository
+  BuildPhase:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: BlueGreenPhase
+    Description: This variable will determine the current phase that the environment is in - taken from SSM Parameter - BlueGreenPhase
+  SourceAMI:
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: BlueGreenAMI
+    Description: AMI Id - taken from SSM Parameter - BlueGreenAMI
+  VpcId:
+    Type: 'AWS::EC2::VPC::Id'
+    Description: VpcId of your existing Virtual Private Cloud (VPC)
+  Subnets:
+    Type: 'List<AWS::EC2::Subnet::Id>'
+    Description: The list of SubnetIds in your Virtual Private Cloud (VPC)
+  LTSecurityGroups:
+    Type: 'List<String>'  
+    Description: The list of Security Groups used by the Launch Template
+  KeyName:
+    Description: Name of an existing EC2 KeyPair for access to the instances
+    Type: 'AWS::EC2::KeyPair::KeyName'
+  ASGMinCapacity:
+    Type: Number
+    Default: 1
+    Description: The minimum capacity for the AutoScaling Group
+  ASGMaxCapacity:
+    Type: Number
+    Default: 2
+    Description: The maximum capacity for the AutoScaling Group
+  ASGDesiredCapacity:
+    Type: Number
+    Default: 1
+    Description: The desired capacity for the AutoScaling Group
+  InstanceType:
+    Type: String
+    Default: 'm5.4xlarge'
+    Description: Webserver instance type
+  LTIamInstanceProfile:
+    Type: String
+    Description: Launch Configuration IAM Instance Profile
+  SNSTopicForAutoScalingGroup:
+    Type: String
+    Description: SNS Notifications
+
+Conditions:
+  Phase2:
+    !Equals [!Ref BuildPhase, Phase2]
+  Phase6:
+    !Equals [!Ref BuildPhase, Phase6]
+  CreateStagingNLB:
+    !Or [!Equals [!Ref BuildPhase, Phase2], !Equals [!Ref BuildPhase, Phase6]]
+  CreateBlueASG:
+    !Or [!Equals [!Ref BuildPhase, Phase1], !Equals [!Ref BuildPhase, Phase2], !Equals [!Ref BuildPhase, Phase3], !Equals [!Ref BuildPhase, Phase4], !Equals [!Ref BuildPhase, Phase6], !Equals [!Ref BuildPhase, Phase7], !Equals [!Ref BuildPhase, Phase7]]
+  CreateGreenASG:
+    !Or [!Equals [!Ref BuildPhase, Phase2], !Equals [!Ref BuildPhase, Phase3], !Equals [!Ref BuildPhase, Phase4],!Equals [!Ref BuildPhase, Phase5], !Equals [!Ref BuildPhase, Phase6], !Equals [!Ref BuildPhase, Phase7], !Equals [!Ref BuildPhase, Phase7]]
+  BlueListeners:
+    !Or [!Equals [!Ref BuildPhase, Phase1], !Equals [!Ref BuildPhase, Phase2], !Equals [!Ref BuildPhase, Phase3], !Equals [!Ref BuildPhase, Phase8]]
+  GreenListeners:
+    !Or [!Equals [!Ref BuildPhase, Phase4], !Equals [!Ref BuildPhase, Phase5], !Equals [!Ref BuildPhase, Phase6], !Equals [!Ref BuildPhase, Phase7]]
+
+Resources:
+#### Shared Resources ####
+# Live-NLB 
+  LiveElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties: 
+      IpAddressType: ipv4
+      Name: "BlueGreen-Live-NLB"
+      Scheme: internal
+      Subnets: !Ref Subnets
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: true
+      Tags: 
+        - Key: "Name"
+          Value: "BlueGreen-Live-NLB"
+        - Key: 'CreatedBy'
+          Value: !Ref 'AWS::StackName'
+      Type: network
+# BlueGreen-Live-NLB TG 443
+  LiveNLBTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: "BlueGreen-Dummy-TG443"
+      Port: 443
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: "BlueGreen-Dummy-TG443"
+        - Key: 'CreatedBy'
+          Value: !Ref 'AWS::StackName'
+# BlueGreen-Live-NLB TG 80
+  LiveNLBTargetGroup80:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: "BlueGreen-Dummy-TG80"
+      Port: 80
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: "BlueGreen-Dummy-TG80"
+        - Key: 'CreatedBy'
+          Value: !Ref 'AWS::StackName'
+# Prod Listener 443
+  ProdLBTargetGroupListener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !If [BlueListeners, !Ref BlueLoadBalancerTargetGroup443, !Ref GreenLoadBalancerTargetGroup443]
+      LoadBalancerArn: !Ref LiveElasticLoadBalancer
+      Port: 443
+      Protocol: TCP
+# Prod Listener 80
+  ProdLBTargetGroupListener80:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !If [BlueListeners, !Ref BlueLoadBalancerTargetGroup80, !Ref GreenLoadBalancerTargetGroup80]
+      LoadBalancerArn: !Ref LiveElasticLoadBalancer
+      Port: 80
+      Protocol: TCP
+# Staging NLB
+  StagingElasticLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Condition: CreateStagingNLB
+    Properties: 
+      IpAddressType: ipv4
+      Name: "BlueGreen-Staging-NLB"
+      Scheme: internal
+      Subnets: !Ref Subnets
+      LoadBalancerAttributes:
+        - Key: load_balancing.cross_zone.enabled
+          Value: true
+      Tags: 
+        - Key: "Name"
+          Value: "BlueGreen-Staging-NLB"
+        - Key: 'CreatedBy'
+          Value: !Ref 'AWS::StackName'
+      Type: network
+# Staging Listener 443
+  StagingLBTargetGroupListener443:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateStagingNLB
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !If [Phase6, !Ref BlueLoadBalancerTargetGroup443, !If [Phase2, !Ref GreenLoadBalancerTargetGroup443, !Ref "AWS::NoValue" ]]
+      LoadBalancerArn: !Ref StagingElasticLoadBalancer
+      Port: 443
+      Protocol: TCP
+# Staging Listener 80
+  StagingLBTargetGroupListener80:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: CreateStagingNLB
+    Properties:
+      DefaultActions:
+      - Type: forward
+        TargetGroupArn: !If [Phase6, !Ref BlueLoadBalancerTargetGroup80, !If [Phase2, !Ref GreenLoadBalancerTargetGroup80, !Ref "AWS::NoValue" ]]
+      LoadBalancerArn: !Ref StagingElasticLoadBalancer
+      Port: 80
+      Protocol: TCP
+
+
+#### Blue Resources ####
+# Blue TG 443
+  BlueLoadBalancerTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateBlueASG
+    Properties:
+      Name: FUSWEB-TG443-Blue
+      Port: 443
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: BlueGreen-TG443-Blue
+        - Key: 'BuildPhase'
+          Value: !Ref BuildPhase
+# Blue TG 80
+  BlueLoadBalancerTargetGroup80:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateBlueASG
+    Properties:
+      Name: BlueGreen-TG80-Blue
+      Port: 80
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: BlueGreen-TG443-Blue
+        - Key: 'BuildPhase'
+          Value: !Ref BuildPhase
+# Blue Launch Template
+  BlueLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: CreateBlueASG
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        EbsOptimized: 'true'
+        DisableApiTermination: 'false'
+        IamInstanceProfile:
+          Name: !Ref LTIamInstanceProfile
+        KeyName: !Ref KeyName
+        ImageId: !Ref SourceAMI
+        SecurityGroupIds: !Ref LTSecurityGroups
+        Monitoring:
+          Enabled: True
+        UserData:
+          Fn::Base64:
+            Fn::Sub: |
+              <powershell>
+              Start-Transcript -Path "C:\userdata-transcript_$(Get-Date -format 'yyyy-MM-dd_HH-mm-ss').log"
+              # Whatever userdata you normally use
+              Stop-Transcript
+              </powershell>
+              <persist>true</persist>
+      LaunchTemplateName: BlueGreen-LT-BLUE
+# Blue ASG (add TargetGroupARNs)
+  BlueAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: CreateBlueASG
+    Properties:
+      AutoScalingGroupName: BlueGreen-ASG-Blue
+      MinSize: !Ref ASGMinCapacity
+      MaxSize: !Ref ASGMaxCapacity
+      DesiredCapacity: !Ref ASGDesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateName: BlueGreen-LT-BLUE
+        Version: 1
+      VPCZoneIdentifier: !Ref Subnets
+      TargetGroupARNs: 
+        - !Ref BlueLoadBalancerTargetGroup443
+        - !Ref BlueLoadBalancerTargetGroup80
+      TerminationPolicies:
+        - Default
+      MetricsCollection:
+        - Granularity: "1Minute"
+          Metrics:
+          - 'GroupMaxSize'
+          - 'GroupMinSize'
+          - 'GroupStandbyInstances'
+          - 'GroupInServiceInstances'
+          - 'GroupPendingInstances'
+          - 'GroupTotalInstances'
+          - 'GroupDesiredCapacity'
+          - 'GroupTerminatingInstances'
+      NotificationConfigurations:
+      - TopicARN: !Ref SNSTopicForAutoScalingGroup
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags: 
+        - Key: "Name"
+          PropagateAtLaunch: true
+          Value: BlueGreen-ASG-Blue
+        - Key: 'CreatedBy'
+          PropagateAtLaunch: true
+          Value: !Ref 'AWS::StackName'
+        - Key: 'BuildPhase'
+          PropagateAtLaunch: true
+          Value: !Ref BuildPhase
+
+  BlueASGScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: CreateBlueASG
+    Properties:
+      AutoScalingGroupName: !Ref BlueAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 1100
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+  BlueASGLifeCycleHook:
+    Type: AWS::AutoScaling::LifecycleHook
+    Condition: CreateBlueASG
+    Properties:
+      AutoScalingGroupName: !Ref BlueAutoScalingGroup
+      DefaultResult: CONTINUE
+      HeartbeatTimeout: 600
+      LifecycleHookName: RemoveFromDomainHook
+      LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+
+#### Green Resources ####
+# Green TG 443
+  GreenLoadBalancerTargetGroup443:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateGreenASG
+    Properties:
+      Name: BlueGreen-TG443-Green
+      Port: 443
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: BlueGreen-TG443-Green
+        - Key: 'BuildPhase'
+          Value: !Ref BuildPhase
+# Green TG 80
+  GreenLoadBalancerTargetGroup80:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Condition: CreateGreenASG
+    Properties:
+      Name: BlueGreen-TG80-Green
+      Port: 80
+      Protocol: TCP
+      TargetType: instance
+      VpcId: !Ref VpcId
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: 60  
+      Tags:
+        - Key: Name
+          Value: BlueGreen-TG443-Green
+        - Key: 'BuildPhase'
+          Value: !Ref BuildPhase
+# Green Launch Template
+  GreenLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Condition: CreateGreenASG
+    Properties:
+      LaunchTemplateData:
+        InstanceType: !Ref InstanceType
+        EbsOptimized: 'true'
+        DisableApiTermination: 'false'
+        IamInstanceProfile:
+          Name: !Ref LTIamInstanceProfile
+        KeyName: !Ref KeyName
+        ImageId: !Ref SourceAMI
+        SecurityGroupIds: !Ref LTSecurityGroups
+        Monitoring:
+          Enabled: True
+        UserData:
+          Fn::Base64:
+            Fn::Sub: |
+              <powershell>
+              Start-Transcript -Path "C:\userdata-transcript_$(Get-Date -format 'yyyy-MM-dd_HH-mm-ss').log"
+              # Whatever userdata you normally use
+              Stop-Transcript
+              </powershell>
+              <persist>true</persist>
+      LaunchTemplateName: BlueGreen-LT-GREEN
+# Green ASG (add TargetGroupARNs)
+  GreenAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Condition: CreateGreenASG
+    Properties:
+      AutoScalingGroupName: BlueGreen-ASG-Green
+      MinSize: !Ref ASGMinCapacity
+      MaxSize: !Ref ASGMaxCapacity
+      DesiredCapacity: !Ref ASGDesiredCapacity
+      LaunchTemplate:
+        LaunchTemplateName: BlueGreen-LT-GREEN
+        Version: 1
+      VPCZoneIdentifier: !Ref Subnets
+      TargetGroupARNs:
+        - !Ref GreenLoadBalancerTargetGroup443
+        - !Ref GreenLoadBalancerTargetGroup80
+      TerminationPolicies:
+        - Default
+      MetricsCollection:
+        - Granularity: "1Minute"
+          Metrics:
+          - 'GroupMaxSize'
+          - 'GroupMinSize'
+          - 'GroupStandbyInstances'
+          - 'GroupInServiceInstances'
+          - 'GroupPendingInstances'
+          - 'GroupTotalInstances'
+          - 'GroupDesiredCapacity'
+          - 'GroupTerminatingInstances'
+      NotificationConfigurations:
+      - TopicARN: !Ref SNSTopicForAutoScalingGroup
+        NotificationTypes:
+        - autoscaling:EC2_INSTANCE_LAUNCH
+        - autoscaling:EC2_INSTANCE_LAUNCH_ERROR
+        - autoscaling:EC2_INSTANCE_TERMINATE
+        - autoscaling:EC2_INSTANCE_TERMINATE_ERROR
+      Tags: 
+        - Key: "Name"
+          PropagateAtLaunch: true
+          Value: BlueGreen-ASG-Green
+        - Key: 'CreatedBy'
+          PropagateAtLaunch: true
+          Value: !Ref 'AWS::StackName'
+        - Key: 'BuildPhase'
+          PropagateAtLaunch: true
+          Value: !Ref BuildPhase
+
+  GreenASGScalingPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Condition: CreateGreenASG
+    Properties:
+      AutoScalingGroupName: !Ref GreenAutoScalingGroup
+      PolicyType: TargetTrackingScaling
+      EstimatedInstanceWarmup: 1100
+      TargetTrackingConfiguration:
+        PredefinedMetricSpecification:
+          PredefinedMetricType: ASGAverageCPUUtilization
+        TargetValue: 50
+
+  GreenASGLifeCycleHook:
+    Type: AWS::AutoScaling::LifecycleHook
+    Condition: CreateGreenASG
+    Properties:
+      AutoScalingGroupName: !Ref GreenAutoScalingGroup
+      DefaultResult: CONTINUE
+      HeartbeatTimeout: 600
+      LifecycleHookName: RemoveFromDomainHook
+      LifecycleTransition: autoscaling:EC2_INSTANCE_TERMINATING
+
+
+Outputs:
+  BackupLoadBalancerDNSName:
+    Description: The DNSName of the Staging Load Balancer
+    Value: !GetAtt StagingElasticLoadBalancer.DNSName
+    Condition: CreateStagingNLB
