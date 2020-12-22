@@ -1,4 +1,4 @@
-# EC2 Blue/Green Deployments without DNS changes
+# EC2 Blue/Green CloudFormation Deployments without DNS changes
 This is a CloudFormation script to perform Blue/Green deployments using EC2 resources. It has been created to allow for fast switch over and switch back without having to wait for DNS propogation, or EC2 instance replacement. So instead of rotating instances in and out of a single target group, the target group that the live load balancer talks to is changed. This allows for a near instant switch between environments, and in the event of a problem, failback. In practice this seems to take around a second or so to actually switch. The non-live environment is created and deleted based on what phase of the deployment we are in.
 
 There is also the staging load balancer that is connected to the non-live environment while it exists.
