@@ -88,24 +88,7 @@ Resources:
         - Key: 'CreatedBy'
           Value: !Ref 'AWS::StackName'
       Type: network
-# BlueGreen-Live-NLB TG 443
-  LiveNLBTargetGroup443:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: "BlueGreen-Dummy-TG443"
-      Port: 443
-      Protocol: TCP
-      TargetType: instance
-      VpcId: !Ref VpcId
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: 60  
-      Tags:
-        - Key: Name
-          Value: "BlueGreen-Dummy-TG443"
-        - Key: 'CreatedBy'
-          Value: !Ref 'AWS::StackName'
-# BlueGreen-Live-NLB TG 80
+
   LiveNLBTargetGroup80:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
@@ -190,7 +173,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Condition: CreateBlueASG
     Properties:
-      Name: FUSWEB-TG443-Blue
+      Name: BlueGreen-TG443-Blue
       Port: 443
       Protocol: TCP
       TargetType: instance
@@ -218,7 +201,7 @@ Resources:
           Value: 60  
       Tags:
         - Key: Name
-          Value: BlueGreen-TG443-Blue
+          Value: BlueGreen-TG80-Blue
         - Key: 'BuildPhase'
           Value: !Ref BuildPhase
 # Blue Launch Template
