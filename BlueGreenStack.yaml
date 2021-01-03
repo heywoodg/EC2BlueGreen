@@ -89,22 +89,6 @@ Resources:
           Value: !Ref 'AWS::StackName'
       Type: network
 
-  LiveNLBTargetGroup80:
-    Type: AWS::ElasticLoadBalancingV2::TargetGroup
-    Properties:
-      Name: "BlueGreen-Dummy-TG80"
-      Port: 80
-      Protocol: TCP
-      TargetType: instance
-      VpcId: !Ref VpcId
-      TargetGroupAttributes:
-        - Key: deregistration_delay.timeout_seconds
-          Value: 60  
-      Tags:
-        - Key: Name
-          Value: "BlueGreen-Dummy-TG80"
-        - Key: 'CreatedBy'
-          Value: !Ref 'AWS::StackName'
 # Prod Listener 443
   ProdLBTargetGroupListener443:
     Type: AWS::ElasticLoadBalancingV2::Listener
